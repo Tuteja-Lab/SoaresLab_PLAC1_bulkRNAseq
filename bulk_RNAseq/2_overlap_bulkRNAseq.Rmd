@@ -1,0 +1,241 @@
+---
+title: "Overlap analyses"
+date: "`r Sys.Date()`"
+author:
+  - name: Arun Seetharam
+    affiliation: Tuteja Lab
+    affiliation_url: https://www.tutejalab.org
+output:
+  #pdf_document: default
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+options(max.print = "125")
+knitr::opts_chunk$set(
+  echo = TRUE,
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "assets/",
+  fig.width = 8,
+  prompt = FALSE,
+  tidy = FALSE,
+  message = FALSE,
+  warning = TRUE
+)
+knitr::opts_knit$set(width = 75)
+```
+# Data import
+
+```{r import}
+setwd("/work/LAS/geetu-lab/arnstrm/overlap_RNAseq_bulk")
+library(tidyverse)
+library(ComplexUpset)
+# rat datasets
+load("/work/LAS/geetu-lab/arnstrm/rTS_Diff_PLAC1_KD/assets/rTS_Diff_PLAC1_KD_genelists.RData")
+rTS_Diff_PLAC1_KD.hsPLAC1vsSCR.dw.pce1 <- hsPLAC1vsSCR.dw.pce1
+rTS_Diff_PLAC1_KD.hsPLAC1vsSCR.up.pce1 <- hsPLAC1vsSCR.up.pce1
+rTS_Diff_PLAC1_KD.PLAC1vsSCR.dw.pce1 <- PLAC1vsSCR.dw.pce1
+rTS_Diff_PLAC1_KD.PLAC1vsSCR.up.pce1   <- PLAC1vsSCR.up.pce1  
+load("/work/LAS/geetu-lab/arnstrm/PLAC1_JZ_18.5/assets/PLAC1_JZ_18.5_genelists.RData")
+PLAC1_JZ_18.5.hsKOvsWT.dw.pce1<- hsKOvsWT.dw.pce1
+PLAC1_JZ_18.5.hsKOvsWT.up.pce1<- hsKOvsWT.up.pce1
+PLAC1_JZ_18.5.KOvsWT.dw.pce1<- KOvsWT.dw.pce1
+PLAC1_JZ_18.5.KOvsWT.up.pce1<- KOvsWT.up.pce1
+load("/work/LAS/geetu-lab/arnstrm/PLAC1_placenta_13.5/assets/PLAC1_placenta_13.5_genelists.RData")
+PLAC1_placenta_13.5.hsKOvsWT.dw.pce1 <- hsKOvsWT.dw.pce1
+PLAC1_placenta_13.5.hsKOvsWT.up.pce1 <- hsKOvsWT.up.pce1
+PLAC1_placenta_13.5.KOvsWT.dw.pce1   <- KOvsWT.dw.pce1
+PLAC1_placenta_13.5.KOvsWT.up.pce1   <- KOvsWT.up.pce1
+# human datasets
+load("/work/LAS/geetu-lab/arnstrm/BeWo_PLAC1_KD/assets/BeWo_PLAC1_KD_genelists.RData")
+BeWo_PLAC1_KD.CTvsKD.dw.pce1 <-  CTvsKD.dw.pce1
+BeWo_PLAC1_KD.CTvsKD.up.pce1 <-  CTvsKD.up.pce1
+load("/work/LAS/geetu-lab/arnstrm/CT29_ST3D_PLAC1_KD/assets/CT29_ST3D_PLAC1_KD_KD_genelists.RData")
+CT29_ST3D_PLAC1_KD.SCRvsPLAC1.dw.pce1 <- SCRvsPLAC1.dw.pce1
+CT29_ST3D_PLAC1_KD.SCRvsPLAC1.up.pce1 <- SCRvsPLAC1.up.pce1
+load("/work/LAS/geetu-lab/arnstrm/hTS_CT27_ST3D_PLAC1_KD/assets/hTS_CT27_ST3D_PLAC1_KD_genelists.RData")
+hTS_CT27_ST3D_PLAC1_KD.PLAC1vsSCR.up.pce1 <- PLAC1vsSCR.up.pce1
+hTS_CT27_ST3D_PLAC1_KD.PLAC1vsSCR.dw.pce1 <- PLAC1vsSCR.dw.pce1
+```
+
+
+
+```{r createLists}
+# first human
+# comparing genes upregulated in CT, SCR, SCR
+hs.up.CT_SCRct27_SCRct29 <-
+  reduce(list(
+    data.frame(gene = BeWo_PLAC1_KD.CTvsKD.up.pce1, set1 = 1),
+    data.frame(gene = CT29_ST3D_PLAC1_KD.SCRvsPLAC1.up.pce1, set2 =1),
+    data.frame(gene = hTS_CT27_ST3D_PLAC1_KD.PLAC1vsSCR.dw.pce1, set3 = 1)
+  ), full_join)
+hs.up.CT_SCRct27_SCRct29[is.na(hs.up.CT_SCRct27_SCRct29)] <- 0
+colnames(hs.up.CT_SCRct27_SCRct29) <-
+  c("gene", "BeWo.CT", "SCR.CT27", "SCR.CT29")
+write_delim(
+  hs.up.CT_SCRct27_SCRct29,
+  file = "hs.up.CT_SCRct27_SCRct29.tsv",
+  delim = "\t"
+)
+hs.up.CT_SCRct27_SCRct29 <- column_to_rownames(hs.up.CT_SCRct27_SCRct29, var = "gene")
+# comparing genes upregulated in KD, Plac1, Plac1
+hs.up.KD_Plac1ct27_Plac1ct29 <-
+  reduce(list(
+    data.frame(gene = BeWo_PLAC1_KD.CTvsKD.dw.pce1, set1 = 1),
+    data.frame(gene = CT29_ST3D_PLAC1_KD.SCRvsPLAC1.dw.pce1, set2 = 1),
+    data.frame(gene = hTS_CT27_ST3D_PLAC1_KD.PLAC1vsSCR.up.pce1, set3 = 1)
+  ), full_join)
+hs.up.KD_Plac1ct27_Plac1ct29[is.na(hs.up.KD_Plac1ct27_Plac1ct29)] <- 0
+colnames(hs.up.KD_Plac1ct27_Plac1ct29) <-
+  c("gene", "BeWo.KD", "Plac1.CT27", "Plac1.CT29")
+
+write_delim(
+  hs.up.KD_Plac1ct27_Plac1ct29,
+  file = "hs.up.KD_Plac1ct27_Plac1ct29.tsv",
+  delim = "\t"
+)
+
+
+hs.up.KD_Plac1ct27_Plac1ct29 <- column_to_rownames(hs.up.KD_Plac1ct27_Plac1ct29, var = "gene")
+#second Rat
+# comparing genes up in Plac1, KOe13.5 and KOe18.5
+rn.up.Plac1rTS.KOe13.5.KOe18.5 <-
+  reduce(list(
+    data.frame(gene = rTS_Diff_PLAC1_KD.PLAC1vsSCR.dw.pce1, set1 = 1),
+    data.frame(gene = PLAC1_placenta_13.5.KOvsWT.dw.pce1, set2 = 1),
+    data.frame(gene = PLAC1_JZ_18.5.KOvsWT.dw.pce1, set3 = 1)
+  ), full_join)
+rn.up.Plac1rTS.KOe13.5.KOe18.5[is.na(rn.up.Plac1rTS.KOe13.5.KOe18.5)] <- 0
+colnames(rn.up.Plac1rTS.KOe13.5.KOe18.5) <-
+  c("gene", "rTS_Plac1", "e13.5_KO", "e18.5_KO")
+
+write_delim(
+  rn.up.Plac1rTS.KOe13.5.KOe18.5,
+  file = "rn.up.Plac1rTS.KOe13.5.KOe18.5.tsv",
+  delim = "\t"
+)
+
+rn.up.Plac1rTS.KOe13.5.KOe18.5 <- column_to_rownames(rn.up.Plac1rTS.KOe13.5.KOe18.5, var = "gene")
+
+# comparing genes up in SCR, WTe13.5 and WTe18.5
+rn.up.SCRrTS.WTe13.5.KOe18.5 <-reduce(list(
+  data.frame(gene = rTS_Diff_PLAC1_KD.PLAC1vsSCR.up.pce1, set1 = 1),
+  data.frame(gene = PLAC1_placenta_13.5.KOvsWT.up.pce1, set2 =1),
+  data.frame(gene = PLAC1_JZ_18.5.KOvsWT.up.pce1, set3 =1)
+  ), full_join)
+rn.up.SCRrTS.WTe13.5.KOe18.5[is.na(rn.up.SCRrTS.WTe13.5.KOe18.5)] <- 0
+colnames(rn.up.SCRrTS.WTe13.5.KOe18.5) <-
+  c("gene", "rTS_SCR", "e13.5_WT", "e18.5_WT")
+
+write_delim(
+  rn.up.SCRrTS.WTe13.5.KOe18.5,
+  file = "rn.up.SCRrTS.WTe13.5.KOe18.5.tsv",
+  delim = "\t"
+)
+
+
+rn.up.SCRrTS.WTe13.5.KOe18.5 <- column_to_rownames(rn.up.SCRrTS.WTe13.5.KOe18.5, var = "gene")
+
+#third, rat and human combined
+# comparing genes upregulated in CT, SCR, SCR & SCR, WT, WT (rat2human orthologs)
+both.up.CT.SCR.SCR.WT.WT.SCR <-
+  reduce(list(
+    data.frame(gene = BeWo_PLAC1_KD.CTvsKD.up.pce1, set1 = 1),
+    data.frame(gene = CT29_ST3D_PLAC1_KD.SCRvsPLAC1.up.pce1, set2 =1),
+    data.frame(gene = hTS_CT27_ST3D_PLAC1_KD.PLAC1vsSCR.dw.pce1, set3 = 1),
+    data.frame(gene = rTS_Diff_PLAC1_KD.hsPLAC1vsSCR.dw.pce1, set4 = 1),
+    data.frame(gene = PLAC1_placenta_13.5.hsKOvsWT.dw.pce1, set5 =1),
+    data.frame(gene = PLAC1_JZ_18.5.hsKOvsWT.dw.pce1, set6 = 1)
+  ), full_join)
+both.up.CT.SCR.SCR.WT.WT.SCR[is.na(both.up.CT.SCR.SCR.WT.WT.SCR)] <- 0
+colnames(both.up.CT.SCR.SCR.WT.WT.SCR) <-
+  c("gene", "BeWo.CT", "SCR.CT27", "SCR.CT29", "rTS_SCR", "e13.5_WT", "e18.5_WT")
+
+write_delim(
+  both.up.CT.SCR.SCR.WT.WT.SCR,
+  file = "both.up.CT.SCR.SCR.WT.WT.SCR.tsv",
+  delim = "\t"
+)
+both.up.CT.SCR.SCR.WT.WT.SCR <- column_to_rownames(both.up.CT.SCR.SCR.WT.WT.SCR, var = "gene")
+# comparing genes upregulated in KD, Plac1, Plac1 & Plac1, KO, Ko (rat2human orthologs)
+both.up.KD.Plac1.Plac1.KO.KO.Plac1 <-
+  reduce(list(
+    data.frame(gene = BeWo_PLAC1_KD.CTvsKD.dw.pce1, set1 = 1),
+    data.frame(gene = CT29_ST3D_PLAC1_KD.SCRvsPLAC1.dw.pce1, set2 = 1),
+    data.frame(gene = hTS_CT27_ST3D_PLAC1_KD.PLAC1vsSCR.up.pce1, set3 = 1),
+    data.frame(gene = rTS_Diff_PLAC1_KD.hsPLAC1vsSCR.up.pce1, set4 = 1),
+    data.frame(gene = PLAC1_placenta_13.5.hsKOvsWT.up.pce1, set5 = 1),
+    data.frame(gene = PLAC1_JZ_18.5.hsKOvsWT.up.pce1, set6 = 1)
+  ), full_join)
+both.up.KD.Plac1.Plac1.KO.KO.Plac1[is.na(both.up.KD.Plac1.Plac1.KO.KO.Plac1)] <- 0
+colnames(both.up.KD.Plac1.Plac1.KO.KO.Plac1) <-
+  c("gene", "BeWo.KD", "Plac1.CT27", "Plac1.CT29", "rTS_Plac1", "e13.5_KO", "e18.5_KO")
+
+write_delim(
+  both.up.KD.Plac1.Plac1.KO.KO.Plac1,
+  file = "both.up.KD.Plac1.Plac1.KO.KO.Plac1.tsv",
+  delim = "\t"
+)
+both.up.KD.Plac1.Plac1.KO.KO.Plac1 <- column_to_rownames(both.up.KD.Plac1.Plac1.KO.KO.Plac1, var = "gene")
+```
+# Plotting function
+
+```{r upsetFun}
+upPlot <- function(table = "hs.up.CT_SCRct27_SCRct29"){
+  inter = colnames(table)
+  upset(table, inter)
+  }
+```
+
+# Comparing human datasets
+
+## comparing genes upregulated in CT, SCR, SCR
+
+```{r upsetPlot1, fig.cap="", fig.width=12, fig.height=5}
+upPlot(hs.up.CT_SCRct27_SCRct29)
+
+```
+
+## comparing genes upregulated in KD, Plac1, Plac1
+
+```{r upsetPlot2, fig.cap="", fig.width=12, fig.height=5}
+upPlot(hs.up.KD_Plac1ct27_Plac1ct29)
+```
+
+# Comparing Rat datasets
+
+
+## comparing genes up in Plac1, KOe13.5 and KOe18.5
+
+```{r upsetPlot3, fig.cap="", fig.width=12, fig.height=5}
+upPlot(rn.up.Plac1rTS.KOe13.5.KOe18.5 )
+```
+
+## comparing genes upregulated in SCR, WTe13.5 and WTe18.5
+
+```{r upsetPlot4, fig.cap="", fig.width=12, fig.height=5}
+upPlot(rn.up.SCRrTS.WTe13.5.KOe18.5)
+```
+
+
+# Comparing Rat2human orthologs + Human datasets
+
+
+## comparing genes upregulated in CT, SCR, SCR & SCR, WT, WT (rat2human orthologs)
+
+```{r upsetPlot5, fig.cap="", fig.width=12, fig.height=5}
+upPlot(both.up.CT.SCR.SCR.WT.WT.SCR)
+```
+
+## comparing genes upregulated in KD, Plac1, Plac1 & Plac1, KO, Ko (rat2human orthologs)
+
+```{r upsetPlot6, fig.cap="", fig.width=12, fig.height=5}
+upPlot(both.up.KD.Plac1.Plac1.KO.KO.Plac1)
+```
+
