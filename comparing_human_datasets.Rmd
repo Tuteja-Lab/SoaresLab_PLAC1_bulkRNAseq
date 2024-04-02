@@ -1,0 +1,464 @@
+---
+title: "Human dataset RNAseq analyses"
+date: "`r Sys.Date()`"
+author:
+  - name: Arun Seetharam
+    affiliation: Tuteja Lab
+    affiliation_url: https://www.tutejalab.org
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+options(max.print = "125")
+knitr::opts_chunk$set(
+  echo = TRUE,
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "assets/",
+#  dev = 'pdf',
+  dpi = 300,
+#  fig.ext = "pdf",
+  fig.width = 12,
+  fig.height = 8,
+  prompt = FALSE,
+  tidy = FALSE,
+  message = TRUE,
+  warning = FALSE
+)
+knitr::opts_knit$set(width = 75)
+```
+
+# Files copy
+
+```{bash eval = FALSE}
+#copy commands
+```
+
+## Packages
+
+```{r packages, message = FALSE, warning=FALSE}
+library(data.table)
+library(tidyverse)
+library(sva)
+library(DESeq2)
+library(pheatmap)
+library(viridis)
+library(biomaRt)
+```
+
+## Input
+
+```{r input}
+setwd(
+  "C:/Users/arun/OneDrive - Iowa State University/OrganizedDocuments/github/SoaresLab_bulk_RNAseq/human_dataset"
+)
+bewo <- fread("BeWo_PLAC1_KD_counts_genes.tsv")
+CT29 <- fread("CT29_ST3D_PLAC1_KD_counts_genes.tsv")
+colnames(CT29) <-
+  c(
+    "Geneid",
+    "CT29_SCR.1",
+    "CT29_SCR.2",
+    "CT29_SCR.3",
+    "CT29_shPLAC1.1",
+    "CT29_shPLAC1.2",
+    "CT29_shPLAC1.3"
+  )
+CT27 <- fread("hTS_CT27_ST3D_PLAC1_KD_counts_genes.tsv")
+colnames(CT27) <-
+  c(
+    "Geneid",
+    "CT27_PLAC1.4_1",
+    "CT27_PLAC1.4_2",
+    "CT27_PLAC1.4_3",
+    "CT27_SCR_1",
+    "CT27_SCR_2",
+    "CT27_SCR_3"
+  )
+bewo_CT27 <- left_join(bewo, CT27, by = "Geneid")
+bewo_CT27_CT29 <- left_join(bewo_CT27, CT29, by = "Geneid")
+counts <- bewo_CT27_CT29 %>%
+  as_tibble() %>%
+  column_to_rownames(var = "Geneid") %>%
+  as.matrix() 
+```
+
+```{r infoTable}
+info <- as.data.frame(colnames(bewo_CT27_CT29))
+colnames(info) <- "conditions"
+info$expt <- gsub("_.*", "", info$conditions)
+info$sample <-
+  c(
+    "Geneid",
+    "Ctr",
+    "Ctr",
+    "Ctr",
+    "KD",
+    "KD",
+    "KD",
+    "PLAC1",
+    "PLAC1",
+    "PLAC1",
+    "SCR",
+    "SCR",
+    "SCR",
+    "SCR",
+    "SCR",
+    "SCR",
+    "PLAC1",
+    "PLAC1",
+    "PLAC1"
+  )
+info$contrasts <-
+  c(
+    "Geneid",
+    "control",
+    "control",
+    "control",
+    "treatment",
+    "treatment",
+    "treatment",
+    "treatment",
+    "treatment",
+    "treatment",
+    "control",
+    "control",
+    "control",
+    "control",
+    "control",
+    "control",
+    "treatment",
+    "treatment",
+    "treatment"
+  )
+info <- info[c(-1),]
+# new df
+names <- info[-1]
+rownames(names) <- info[, 1]
+names <- names %>% mutate(across(where(is.character), as.factor))
+```
+
+
+## Batch correction
+
+```{r sva}
+all(rownames(names) %in% colnames(counts))
+counts <- counts[, rownames(names)]
+cov1 <- as.factor(names$expt)
+adjusted_counts <- ComBat_seq(counts, batch = cov1, group = NULL)
+```
+
+## DESeq2
+
+```{r deseq2}
+dds <- DESeqDataSetFromMatrix(countData = adjusted_counts,
+                              colData = names,
+                              design = contrasts ~ sample)
+vst <- assay(vst(dds))
+vsd <- vst(dds, blind = FALSE)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+dds <- DESeq(dds)
+```
+
+Various contrasts are set up as follows (a total of 6 combinations)
+
+1. Ctr vs. KD
+2. Ctr vs. PLAC1
+3. Ctr vs. SCR
+4. KD vs. PLAC1
+5. KD vs. SCR
+6. SCR vs. PLAC1
+
+
+```{r contrasts}
+res.KDvsCtr <-
+  results(dds,
+          contrast = c(
+            "sample", 
+            "KD", 
+            "Ctr"))
+res.PLAC1vsCtr <-
+  results(dds,
+          contrast = c(
+            "sample", 
+            "PLAC1", 
+            "Ctr"))
+res.SCRvsCtr <-
+  results(dds,
+          contrast = c(
+            "sample", 
+            "SCR", 
+            "Ctr"))
+res.PLAC1vsKD <-
+  results(dds,
+          contrast = c(
+            "sample", 
+            "PLAC1", 
+            "KD"))
+res.SCRvsKD <-
+  results(dds,
+          contrast = c(
+            "sample", 
+            "SCR", 
+            "KD"))
+res.PLAC1vsSCR <-
+  results(dds,
+          contrast = c(
+            "sample", 
+            "PLAC1", 
+            "SCR"))
+```
+
+
+
+## PCA {.tabset}
+
+```{r pca}
+pcaData <- plotPCA(vsd,
+                   intgroup = c("expt", "sample"),
+                   returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+rv <- rowVars(assay(vsd))
+select <- order(rv, 
+                decreasing = TRUE)[seq_len(min(500,
+                                               length(rv)))]
+
+pca <- prcomp(t(assay(vsd)[select, ]))
+percentVar <- pca$sdev ^ 2 / sum(pca$sdev ^ 2)
+intgroup = c("expt", "sample")
+intgroup.df <- as.data.frame(colData(vsd)[, intgroup, drop = FALSE])
+group <- if (length(intgroup) > 1) {
+  factor(apply(intgroup.df, 1, paste, collapse = " : "))
+}
+d <- data.frame(
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  PC3 = pca$x[, 3],
+  PC4 = pca$x[, 4],
+  PC5 = pca$x[, 5],
+  group = group,
+  intgroup.df,
+  name = colnames(vsd)
+)
+```
+
+### PC1 vs PC2
+
+```{r pca12}
+ggplot(d, aes(PC1, PC2, color = sample, shape = expt)) +
+  scale_shape_manual(values = 1:3) +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  geom_point(size = 2, stroke = 2) +
+  xlab(paste("PC1", round(percentVar[1] * 100, 2), "% variance")) +
+  ylab(paste("PC2", round(percentVar[2] * 100, 2), "% variance"))
+```
+
+
+### PC1 vs PC3
+
+```{r pca13}
+ggplot(d, aes(PC1, PC3, color = sample, shape = expt)) +
+  scale_shape_manual(values = 1:3) +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  geom_point(size = 2, stroke = 2) +
+  xlab(paste("PC1", round(percentVar[1] * 100, 2), "% variance")) +
+  ylab(paste("PC2", round(percentVar[2] * 100, 2), "% variance"))
+```
+
+### PC1 vs PC4
+
+```{r pca14}
+ggplot(d, aes(PC1, PC4, color = sample, shape = expt)) +
+  scale_shape_manual(values = 1:3) +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  geom_point(size = 2, stroke = 2) +
+  xlab(paste("PC1", round(percentVar[1] * 100, 2), "% variance")) +
+  ylab(paste("PC2", round(percentVar[2] * 100, 2), "% variance"))
+```
+
+### PC1 vs PC5
+
+```{r pca15}
+ggplot(d, aes(PC1, PC5, color = sample, shape = expt)) +
+  scale_shape_manual(values = 1:3) +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  geom_point(size = 2, stroke = 2) +
+  xlab(paste("PC1", round(percentVar[1] * 100, 2), "% variance")) +
+  ylab(paste("PC2", round(percentVar[2] * 100, 2), "% variance"))
+
+```
+
+### PC2 vs PC3
+
+```{r pca23}
+ggplot(d, aes(PC2, PC3, color = sample, shape = expt)) +
+  scale_shape_manual(values = 1:3) +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  geom_point(size = 2, stroke = 2) +
+  xlab(paste("PC1", round(percentVar[1] * 100, 2), "% variance")) +
+  ylab(paste("PC2", round(percentVar[2] * 100, 2), "% variance"))
+```
+
+### PC2 vs PC4
+
+```{r pca24}
+ggplot(d, aes(PC2, PC4, color = sample, shape = expt)) +
+  scale_shape_manual(values = 1:3) +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  geom_point(size = 2, stroke = 2) +
+  xlab(paste("PC1", round(percentVar[1] * 100, 2), "% variance")) +
+  ylab(paste("PC2", round(percentVar[2] * 100, 2), "% variance"))
+```
+
+### PC2 vs PC5
+
+```{r pca25}
+ggplot(d, aes(PC2, PC5, color = sample, shape = expt)) +
+  scale_shape_manual(values = 1:3) +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  geom_point(size = 2, stroke = 2) +
+  xlab(paste("PC1", round(percentVar[1] * 100, 2), "% variance")) +
+  ylab(paste("PC2", round(percentVar[2] * 100, 2), "% variance"))
+```
+
+### PC3 vs PC4
+
+```{r pca34}
+ggplot(d, aes(PC3, PC4, color = sample, shape = expt)) +
+  scale_shape_manual(values = 1:3) +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  geom_point(size = 2, stroke = 2) +
+  xlab(paste("PC1", round(percentVar[1] * 100, 2), "% variance")) +
+  ylab(paste("PC2", round(percentVar[2] * 100, 2), "% variance"))
+```
+
+### PC3 vs PC5
+
+```{r pca35}
+ggplot(d, aes(PC3, PC5, color = sample, shape = expt)) +
+  scale_shape_manual(values = 1:3) +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  geom_point(size = 2, stroke = 2) +
+  xlab(paste("PC1", round(percentVar[1] * 100, 2), "% variance")) +
+  ylab(paste("PC2", round(percentVar[2] * 100, 2), "% variance"))
+```
+
+### PC4 vs PC5
+
+```{r pca45}
+ggplot(d, aes(PC4, PC5, color = sample, shape = expt)) +
+  scale_shape_manual(values = 1:3) +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  geom_point(size = 2, stroke = 2) +
+  xlab(paste("PC1", round(percentVar[1] * 100, 2), "% variance")) +
+  ylab(paste("PC2", round(percentVar[2] * 100, 2), "% variance"))
+```
+
+
+## Sample distance
+
+
+```{r distance}
+sampleDists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- colnames(vsd)
+colnames(sampleDistMatrix) <- NULL
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = magma(9))
+```
+
+
+## Gene Information
+
+```{r biomart, eval=FALSE}
+ensembl = useMart("ENSEMBL_MART_ENSEMBL")
+listDatasets(ensembl) %>%
+  filter(str_detect(description, "Human"))
+ensembl = useDataset("hsapiens_gene_ensembl", mart = ensembl)
+listFilters(ensembl) %>%
+  filter(str_detect(name, "ensembl"))
+filterType <- "ensembl_gene_id_version"
+head(rownames(counts))
+counts <- read.delim("assets/counts_genes.tsv", row.names = 1, header = TRUE)
+head(rownames(counts))
+filterValues <- rownames(counts)
+listAttributes(ensembl) %>%
+  head(20)
+attributeNames <- c('ensembl_gene_id_version',
+                    'ensembl_gene_id',
+                    'external_gene_name')
+annot <- getBM(
+  attributes = attributeNames,
+  filters = filterType,
+  values = filterValues,
+  mart = ensembl
+)
+attributeNames <- c('ensembl_gene_id_version',
+                    'gene_biotype',
+                    'external_gene_name',
+                    'description')
+mart <- getBM(
+  attributes = attributeNames,
+  filters = filterType,
+  values = filterValues,
+  mart = ensembl
+)
+write_delim(
+  annot,
+  file = "assets/annot.tsv",
+  delim = "\t"
+)
+write_delim(
+  mart,
+  file = "assets/mart.tsv",
+  delim = "\t"
+)    
+```
+
+Files were saved, so we don’t query BioMart everytime we run the markdown. The files will be loaded, instead
+
+```{r load.biomart}
+mart <-
+  read.csv("assets/mart.tsv",
+           sep = "\t",
+           header = TRUE)
+annot <-
+  read.csv("assets/annot.tsv",
+           sep = "\t",
+           header = TRUE)
+```
+
+
+## Writing DE files
+
+
+```{r processDE}
+processDE(res.KDvsCtr , "KD_vs_Ctr")
+processDE(res.PLAC1vsCtr, "PLAC1_vs_Ctr")
+processDE(res.SCRvsCtr, "SCR_vs_Ctr")
+processDE(res.PLAC1vsKD, "PLAC1_vs_KD")
+processDE(res.SCRvsKD, "SCR_vs_KD")
+processDE(res.PLAC1vsSCR, "PLAC1_vs_SCR")
+```
+
+

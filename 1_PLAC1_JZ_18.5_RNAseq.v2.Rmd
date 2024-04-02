@@ -1,0 +1,901 @@
+---
+title: "PLAC1 JZ 18.5 RNAseq analyses"
+date: "`r Sys.Date()`"
+author:
+  - name: Arun Seetharam
+    affiliation: Tuteja Lab
+    affiliation_url: https://www.tutejalab.org
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+options(max.print = "125")
+knitr::opts_chunk$set(
+  echo = TRUE,
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "assets/",
+#  dev = 'pdf',
+  dpi = 300,
+#  fig.ext = "pdf",
+  fig.width = 12,
+  fig.height = 8,
+  prompt = FALSE,
+  tidy = FALSE,
+  message = FALSE,
+  warning = TRUE
+)
+knitr::opts_knit$set(width = 75)
+```
+
+# Environment Setup
+
+```{bash eval = FALSE}
+salloc -N 1 --exclusive -p amd -t 8:00:00
+conda activate star
+# working dir
+mkdir -p /work/LAS/geetu-lab/arnstrm/PLAC1_JZ_18.5
+cd /work/LAS/geetu-lab/arnstrm/PLAC1_JZ_18.5
+mkdir -p 1_data
+mkdir -p 2_fastqc
+mkdir -p 3_STAR-mapping
+mkdir -p 4_featureCounts
+mkdir -p 5_multiqc
+# file structure
+tree -L 1
+.
+├── 1_data
+├── 2_fastqc
+├── 3_STAR-mapping
+├── 4_featureCounts
+└── 5_multiqc
+```
+
+## Raw data
+
+Raw data was downloaded from the LSS using `rsync` command.
+
+```{bash, eval=FALSE, engine="sh"}
+cd 1_data
+rsync -avP /lss/folder/path/PLAC1_JZ_18.5 ./1_data
+# GEO link will be included later
+```
+
+## Genome/annotation
+
+Additional files required for the analyses were downloaded from [ensembl](https://useast.ensembl.org/Rattus_norvegicus/Info/Index). The downloaded files are as follows:
+
+```{bash eval = FALSE} 
+cd 3_STAR-mapping
+wget http://ftp.ensembl.org/pub/release-105/fasta/rattus_norvegicus/dna/Rattus_norvegicus.mRatBN7.2.dna.toplevel.fa.gz
+wget http://ftp.ensembl.org/pub/release-105/gtf/rattus_norvegicus/Rattus_norvegicus.mRatBN7.2.105.gtf.gz
+gunzip Rattus_norvegicus.mRatBN7.2.dna.toplevel.fa.gz
+gunzip Rattus_norvegicus.mRatBN7.2.105.gtf.gz
+# ids for prot coding genes
+awk 'BEGIN{OFS=FS="\t"} $3=="gene" && $9 ~/gene_biotype "protein_coding";/ {
+    split($9,a,";"); print gensub(/gene_id."(.*)"$/, "\\1", 1, a[1])
+    }' Rattus_norvegicus.mRatBN7.2.105.gtf > mRatBN7.2.protein_coding
+# you should have 23,096 ids (protein-coding genes)
+```
+
+## FastQC
+
+Quality inspection of the reads. The `multiqc` report, collating all samples together are provided as html file.
+
+```{bash eval = FALSE}
+cd 2_fastqc
+for fq in ../1_data/*.fq.gz; do
+  fastqc --threads $SLURM_JOB_CPUS_PER_NODE $fq;
+done
+```
+
+
+# Mapping
+
+To index the genome, following command was run (in an interactive session).
+
+```{bash eval = FALSE} 
+fastaGenome="Rattus_norvegicus.mRatBN7.2.dna.toplevel.fa"
+gtf="Rattus_norvegicus.mRatBN7.2.105.gtf"
+STAR --runThreadN $SLURM_JOB_CPUS_PER_NODE \
+     --runMode genomeGenerate \
+     --genomeDir $(pwd) \
+     --genomeFastaFiles $fastaGenome \
+     --sjdbGTFfile $gtf \
+     --sjdbOverhang 1
+```
+
+Each `fastq` file was mapped to the indexed genome as using `runSTAR_map.sh` script shown below:
+
+```{bash eval = FALSE}
+#!/bin/bash
+conda activate star
+index=/work/LAS/geetu-lab/arnstrm/mRatBN7.2.index
+read1=$1
+read2=$(echo ${read1} | sed 's/_R1_/_R2_/g')
+cpus=${SLURM_JOB_CPUS_PER_NODE}
+out=$(basename ${read1} | cut -f 1-2 -d "_")
+STAR \
+--runThreadN ${cpus} \
+--genomeDir ${index} \
+--outSAMtype BAM SortedByCoordinate \
+--quantMode GeneCounts \
+--outFilterScoreMinOverLread 0.3 \
+--outFilterMatchNminOverLread 0.3 \
+--outFileNamePrefix ${out}_ \
+--readFilesCommand zcat \
+--outWigType bedGraph \
+--outWigStrand Unstranded \
+--outWigNorm RPM \
+--readFilesIn ${read1} ${read2}
+```
+
+Mapping was run with a simple loop:
+
+```{bash eval = FALSE}
+for fq in *_R1_*fastq.gz; do
+  runSTAR_map.sh $fq;
+done
+```
+
+# Counts
+
+For generating counts from the mapped reads, we used `subread` package program `featureCounts`. All bam files were supplied together to generate a single count file for individual samples.
+
+```{bash eval = FALSE}
+cd 3_STAR-mapping
+realpath *.bam > ../4_featureCounts/bam.fofn
+cd ../4_featureCounts
+gtf="Rattus_norvegicus.mRatBN7.2.105.gtf"
+while read line; do
+ln -s $line;
+done
+featureCounts \
+   -T ${SLURM_CPUS_ON_NODE} \
+   -a ${gtf} \
+   -t exon \
+   -g gene_id \
+   -p \
+   -B \
+   --countReadPairs \
+   -o merged_counts.txt \
+   --tmpDir ./tmp *.bam
+```
+
+The generated counts file was processed to use it direclty with `DESeq2`
+
+```{bash eval = FALSE}
+grep -v "^#" merged_counts.txt |\
+    cut -f 1,7- |\
+    sed 's/_Aligned.sortedByCoord.out.bam//g' > merged_clean-counts.txt
+head -n 1 merged_clean-counts.txt > header
+grep -Fw -f mRatBN7.2.proteincoding merged_clean-counts.txt > body
+cat header body > counts_genes.tsv
+rm body header
+```
+
+Create a info file:
+
+```{bash eval = FALSE}
+head -n 1 counts_genes.tsv |\
+   tr "\t" "\n" |\
+   grep -v "^Geneid" |\
+   awk '{print $1"\t"gensub(/^./, "", 1,$1)}' > info.tsv
+```
+
+# Differential expression analysis 
+
+Differential expression (DE) analyses using `DESeq2` was performed as shown below.
+
+## Prerequisites
+
+R packages required for this section are loaded
+
+```{r, warnings=TRUE, message=FALSE}
+# set path
+setwd("/work/LAS/geetu-lab/arnstrm/PLAC1_JZ_18.5")
+# load the modules
+library(tidyverse)
+library(DESeq2)
+library(pheatmap)
+library(ggrepel)
+library(RColorBrewer)
+library(reshape2)
+library(TissueEnrich)
+library(plotly)
+library(cowplot)
+library(biomaRt)
+library(scales)
+library(kableExtra)
+library(htmlwidgets)
+library(DT)
+library(enrichR)
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+library(org.Rn.eg.db)
+library(data.table)
+library(GOSemSim)
+library(DOSE)
+library(pathview)
+```
+
+## Import datasets
+
+The `counts` data and its associated metadata (`coldata`) are imported for analyses.
+
+```{r datasetS, warnings=TRUE, message=FALSE}
+countsFile = 'assets/counts_genes.tsv'
+groupFile = 'assets/info.tsv'
+coldata <-
+  read.csv(
+    groupFile,
+    row.names = 1,
+    sep = "\t",
+    header = FALSE,
+    stringsAsFactors = TRUE
+  )
+colnames(coldata) <- "condition"
+cts <- as.matrix(read.delim(countsFile, row.names = 1, header = TRUE))
+```
+
+Reorder columns of `cts` according to `coldata` rows. Check if samples in both files match.
+
+```{r order2, warnings=TRUE, message=FALSE}
+all(rownames(coldata) %in% colnames(cts))
+cts <- cts[, rownames(coldata)]
+```
+
+## DESeq2
+
+The batch corrected read counts are then used for running DESeq2 analyses
+
+```{r deseq2C, warnings=TRUE, message=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ condition)
+vsd <- vst(dds, blind = FALSE)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+dds <- DESeq(dds)
+```
+
+## PCA plot for QC
+
+PCA plot for the dataset that includes all libraries.
+
+```{r pcaFull_C1-C2, fig.cap="Figure 4: PCA plot for the first 2 principal components", fig.width=8, fig.height=5}
+rv <- rowVars(assay(vsd))
+select <-
+  order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]
+pca <- prcomp(t(assay(vsd)[select, ]))
+percentVar <- pca$sdev ^ 2 / sum(pca$sdev ^ 2)
+intgroup = "condition"
+intgroup.df <- as.data.frame(colData(vsd)[, intgroup, drop = FALSE])
+group <- if (length(intgroup) == 1) {
+  factor(apply(intgroup.df, 1, paste, collapse = " : "))
+}
+d <- data.frame(
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  intgroup.df,
+  name = colnames(vsd)
+)
+ggplot(d, aes(PC1, PC2, color = condition)) +
+  scale_shape_manual(values = 1:12) +
+  scale_color_manual(values = c('KO'	= '#00b462',
+                                'WT' 	  = '#980c80')) +
+  theme_bw() +
+  theme(legend.title = element_blank()) +
+  geom_point(size = 2, stroke = 2) +
+  geom_text_repel(aes(label = name)) +
+  xlab(paste("PC1", round(percentVar[1] * 100, 2), "% variance")) +
+  ylab(paste("PC2", round(percentVar[2] * 100, 2), "% variance"))
+```
+
+## Sample distance for QC
+
+```{r distance, fig.cap="Figure 5: Euclidean distance between samples", fig.width=8, fig.height=5}
+sampleDists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- colnames(vsd)
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+
+```
+
+## Set contrasts and find DE genes
+
+```{r cotnrasts, warnings=TRUE, message=FALSE}
+res.KOvsWT <-
+  results(dds,
+          contrast = c(
+            "condition",
+            "KO",
+            "WT"))
+```
+
+# Functions
+
+## Import functions for processing and plotting
+
+```{r processDE1, warnings=TRUE, message=FALSE}
+source("/work/LAS/geetu-lab/arnstrm/myR_functions/plot_enrichR.R")
+source("/work/LAS/geetu-lab/arnstrm/myR_functions/processDE.R")
+source("/work/LAS/geetu-lab/arnstrm/myR_functions/rat_id_conversion.R")
+source("/work/LAS/geetu-lab/arnstrm/myR_functions/run_pce.R")
+source("/work/LAS/geetu-lab/arnstrm/myR_functions/save_pheatmap.R")
+source("/work/LAS/geetu-lab/arnstrm/myR_functions/theme_clean.R")
+source("/work/LAS/geetu-lab/arnstrm/myR_functions/volcano_plots.R")
+```
+
+## Gene information
+
+```{r martObj1, eval = FALSE}
+ensembl = useMart("ENSEMBL_MART_ENSEMBL")
+listDatasets(ensembl) %>%
+  filter(str_detect(description, "Rat"))
+ensembl = useDataset("rnorvegicus_gene_ensembl", mart = ensembl)
+listFilters(ensembl) %>%
+  filter(str_detect(name, "ensembl"))
+filterType <- "ensembl_gene_id"
+counts <- read.delim("assets/counts_genes.tsv", row.names = 1, header = TRUE)
+filterValues <- rownames(counts)
+listAttributes(ensembl) %>%
+  head(20)
+attributeNames <- c('ensembl_gene_id',
+                    'ensembl_gene_id_version',
+                    'external_gene_name')
+annot <- getBM(
+  attributes = attributeNames,
+  filters = filterType,
+  values = filterValues,
+  mart = ensembl
+)
+attributeNames <- c('ensembl_gene_id',
+                    'external_gene_name',
+                    'gene_biotype',
+                    'description')
+mart <- getBM(
+  attributes = attributeNames,
+  filters = filterType,
+  values = filterValues,
+  mart = ensembl
+)
+write_delim(
+  annot,
+  file = "assets/annot.tsv",
+  delim = "\t"
+)
+write_delim(
+  mart,
+  file = "assets/mart.tsv",
+  delim = "\t"
+)    
+```
+
+Files were saved, so we don't query BioMart everytime we run the markdown. The files will be loaded, instead
+
+```{r martObj2, warnings=TRUE, message=FALSE}
+mart <-
+    read.csv(
+        "assets/mart.tsv",
+        sep = "\t",
+        header = TRUE,
+    )
+annot <-
+    read.csv(
+        "assets/annot.tsv",
+        sep = "\t",
+        header = TRUE,
+    )
+# Plac1 gene does not have a name
+annot$external_gene_name[annot$ensembl_gene_id == "ENSRNOG00000002379"] <- "Plac1"
+mart$external_gene_name[mart$ensembl_gene_id == "ENSRNOG00000002379"] <- "Plac1"
+```
+
+
+# Results
+
+## Write files
+
+```{r processDE2, warnings=TRUE, message=FALSE}
+processDE.id(res.KOvsWT, "KOvsWT")
+```
+
+
+## Volcano plots {.tabset}
+
+### KO vs. WT (fc)
+
+```{r vol1, fig.cap="Fig X: KO vs WT (purple/negFC = overexpressed in WT; green/posFC = overexpressed in KO)", fig.width=8, fig.height=5, warnings=FALSE, message=FALSE}
+g <- volcanoPlots(
+  res.se = res.KOvsWT,
+  string = "KOvsWT",
+  first = "KO",
+  second = "WT",
+  color1 = "#00b462",
+  color2 = "#4d4d4d",
+  color3 = "#980c80",
+  ChartTitle = "KO vs. WT",
+  labelType = "fc"
+)
+g
+```
+
+### KO vs. WT (interactive)
+
+```{r vol2, fig.cap="Fig X: KO vs WT (purple/negFC = overexpressed in WT; green/posFC = overexpressed in KO)", fig.width=5, fig.height=3, warnings=FALSE, message=FALSE}
+ggplotly(g)
+```
+
+### KO vs. WT (padj)
+
+```{r vol3, fig.cap="Fig X: KO vs WT (purple/negFC = overexpressed in WT; green/posFC = overexpressed in KO)", fig.width=8, fig.height=5, warnings=FALSE, message=FALSE}
+g <- volcanoPlots(
+  res.se = res.KOvsWT,
+  string = "KOvsWT",
+  first = "KO",
+  second = "WT",
+  color1 = "#00b462",
+  color2 = "#4d4d4d",
+  color3 = "#980c80",
+  ChartTitle = "KO vs. WT",
+  labelType = "padj"
+)
+g
+```
+
+```{r enrichR, warnings=TRUE, message=FALSE}
+setEnrichrSite("Enrichr")
+websiteLive <- TRUE
+myDBs <-
+  c(
+    "DisGeNET",
+    "GO_Biological_Process_2021",
+    "HDSigDB_Human_2021",
+    "KEGG_2021_Human",
+    "GTEx_Tissues_V8_2023",
+    "MGI_Mammalian_Phenotype_Level_3",
+    "MGI_Mammalian_Phenotype_Level_4_2021",
+    "WikiPathways_2019_Human",
+    "Panther_2015"
+  )
+if (websiteLive) {
+  KOvsWT.up.enriched <- enrichr(KOvsWT.up.pce2, myDBs)
+  KOvsWT.dw.enriched <- enrichr(KOvsWT.dw.pce2, myDBs)
+}
+```
+
+## Convert genes to human orthologs
+
+```{r conversion, warnings=FALSE, message=FALSE}
+hsKOvsWT.up.pce1 <- rat2humanID(KOvsWT.up.pce1)
+hsKOvsWT.dw.pce1 <- rat2humanID(KOvsWT.dw.pce1)
+hsKOvsWT.up.pce2 <- rat2humanName(KOvsWT.up.pce1)
+hsKOvsWT.dw.pce2 <- rat2humanName(KOvsWT.dw.pce1)
+```
+
+
+## PCE tests (green/posFC = overexpressed in KO) {.tabset}
+
+
+### VentoTormo
+```{r pceA1, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotPCE(inputGenes = hsKOvsWT.up.pce1, dataset = "Vt", myColor = "#00B462")
+```
+
+### Xiang
+```{r pceA2, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotPCE(inputGenes = hsKOvsWT.up.pce2, dataset = "Xi", myColor = "#00B462")
+```
+
+### Zhou&Petropoulos (Castel)
+
+```{r pceA3, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotPCE(inputGenes = hsKOvsWT.up.pce2, dataset = "Zp", myColor = "#00B462")
+```
+
+### Rostovskaya (Hs)
+
+```{r pceA4, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotPCE(inputGenes = hsKOvsWT.up.pce2, dataset = "Ro.Hs", myColor = "#00B462")
+```
+
+### Rostovskaya (Cy)
+
+```{r pceA5, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotPCE(inputGenes = hsKOvsWT.up.pce2, dataset = "Ro.Cy", myColor = "#00B462")
+```
+
+
+## PCE tests (purple/negFC = overexpressed in WT) {.tabset}
+
+### VentoTormo
+```{r pceB1, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotPCE(inputGenes = hsKOvsWT.dw.pce1, dataset = "Vt", myColor = "#980C80")
+```
+
+### Xiang
+```{r pceB2, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotPCE(inputGenes = hsKOvsWT.dw.pce2, dataset = "Xi", myColor = "#980C80")
+```
+
+### Zhou&Petropoulos (Castel)
+
+```{r pceB3, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotPCE(inputGenes = hsKOvsWT.dw.pce2, dataset = "Zp", myColor = "#980C80")
+```
+
+### Rostovskaya (Hs)
+
+```{r pceB4, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotPCE(inputGenes = hsKOvsWT.dw.pce2, dataset = "Ro.Hs", myColor = "#980C80")
+```
+
+### Rostovskaya (Cy)
+
+```{r pceB5, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotPCE(inputGenes = hsKOvsWT.dw.pce2, dataset = "Ro.Cy", myColor = "#980C80")
+```
+
+
+
+## Enrichment tests (green/posFC = overexpressed in KO) {.tabset}
+
+
+### DisGeNET
+```{r erA1, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.up.enriched, table="DisGeNET" , myColor = "#00B462")
+```
+
+
+### GO_Biological_Process_2021
+```{r erA2, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.up.enriched, table="GO_Biological_Process_2021" , "#00B462")
+```
+
+### HDSigDB_Human_2021
+
+```{r erA3, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.up.enriched, table="HDSigDB_Human_2021" , "#00B462")
+```
+
+### KEGG_2021_Human
+
+```{r erA4, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.up.enriched, table="KEGG_2021_Human" , "#00B462")
+```
+
+### GTEx_Tissues_V8_2023
+
+```{r erA5, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.up.enriched, table="GTEx_Tissues_V8_2023" , "#00B462")
+```
+
+### MGI_Mammalian_Phenotype_Level_3
+
+```{r erA6, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.up.enriched, table="MGI_Mammalian_Phenotype_Level_3" , "#00B462")
+```
+
+### MGI_Mammalian_Phenotype_Level_4_2021
+
+```{r erA7, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.up.enriched, table="MGI_Mammalian_Phenotype_Level_4_2021" , "#00B462")
+```
+
+### WikiPathways_2019_Human
+
+```{r erA8, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.up.enriched, table="WikiPathways_2019_Human" , "#00B462")
+```
+
+### Panther_2015
+   
+```{r erA9, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.up.enriched, table="Panther_2015" , "#00B462")
+```
+
+ 
+
+## Enrichment tests (purple/negFC = overexpressed in WT) {.tabset}
+
+
+### DisGeNET
+```{r erB1, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.dw.enriched, table="DisGeNET" , myColor = "#980C80")
+```
+
+
+### GO_Biological_Process_2021
+```{r erB2, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.dw.enriched, table="GO_Biological_Process_2021" , "#980C80")
+```
+
+### HDSigDB_Human_2021
+
+```{r erB3, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.dw.enriched, table="HDSigDB_Human_2021" , "#980C80")
+```
+
+### KEGG_2021_Human
+
+```{r erB4, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.dw.enriched, table="KEGG_2021_Human" , "#980C80")
+```
+
+### GTEx_Tissues_V8_2023
+
+```{r erB5, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.dw.enriched, table="GTEx_Tissues_V8_2023" , "#980C80")
+```
+
+### MGI_Mammalian_Phenotype_Level_3
+
+```{r erB6, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.dw.enriched, table="MGI_Mammalian_Phenotype_Level_3" , "#980C80")
+```
+
+### MGI_Mammalian_Phenotype_Level_4_2021
+
+```{r erB7, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.dw.enriched, table="MGI_Mammalian_Phenotype_Level_4_2021" , "#980C80")
+```
+
+### WikiPathways_2019_Human
+
+```{r erB8, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.dw.enriched, table="WikiPathways_2019_Human" , "#980C80")
+```
+
+### Panther_2015
+   
+```{r erB9, fig.cap="", fig.width=12, fig.height=5, warnings=FALSE, message=FALSE}
+plotEnrichR(KOvsWT.dw.enriched, table="Panther_2015" , "#980C80")
+```
+
+# GSEA
+
+## Prepare GeneList
+
+```{r prepareGenelist}
+filteredDE <- fread("assets/DE_KOvsWT_filtered.tsv")
+# create named vector with geneID and Log2FC
+original_gene_list <- filteredDE$log2FoldChange
+names(original_gene_list) <- filteredDE$Gene
+gene_list<-na.omit(original_gene_list)
+gene_list = sort(gene_list, decreasing = TRUE)
+```
+
+## run GSEA
+
+```{r runGSEA, message=TRUE}
+gse <- gseGO(
+  geneList = gene_list,
+  ont = "ALL",
+  keyType = "ENSEMBL",
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.05,
+  verbose = TRUE,
+  OrgDb = org.Rn.eg.db,
+  pAdjustMethod = "BH",
+  eps = 0,
+  exponent = 1
+)
+saveRDS(gse, file = "assets/gsea.rds")
+```
+
+## Results table
+
+```{r resultsTable}
+gseTable <- as_tibble(gse)
+DT::datatable(
+  gseTable,
+  filter = "top",
+  options = list(pageLength = 10)) %>%
+  DT::formatRound(c("enrichmentScore", "NES", "pvalue", "p.adjust", "qvalue"), 2) %>%
+  DT::formatStyle("core_enrichment",
+              "white-space" = "nowrap")
+```
+
+
+## Plots {.tabset}
+
+### Blobplot plot
+
+```{r blobplot, fig.width = 12, fig.height = 8}
+dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign)
+```
+
+### Enrichment Map
+
+For the first 15 categories
+
+```{r enrichmentMap}
+mapGO <- godata('org.Rn.eg.db', ont = "BP")
+emaGSE <- pairwise_termsim(gse, method="Wang", semData = mapGO)
+emapplot(emaGSE, showCategory = 15)
+```
+
+### Category Netplot
+
+Showing 5 categories
+
+```{r netplot}
+cnetplot(gse, categorySize="pvalue", foldChange=gene_list, showCategory = 5)
+```
+
+### Ridgeplot
+
+```{r ridgeplot, fig.width = 12, fig.height = 8}
+ridgeplot(gse) + labs(x = "enrichment distribution")
+```
+
+## GSEA plot {.tabset}
+
+For the top 20 categories
+
+### set1
+
+```{r gseaP1}
+gseaplot(gse, by = "all", title = gse$Description[1], geneSetID = 1)
+```
+
+### set2
+
+```{r gseaP2}
+gseaplot(gse, by = "all", title = gse$Description[2], geneSetID = 2)
+```
+
+### set3
+
+```{r gseaP3}
+gseaplot(gse, by = "all", title = gse$Description[3], geneSetID = 3)
+```
+
+### set4
+
+```{r gseaP4}
+gseaplot(gse, by = "all", title = gse$Description[4], geneSetID = 4)
+```
+
+### set5
+
+```{r gseaP5}
+gseaplot(gse, by = "all", title = gse$Description[5], geneSetID = 5)
+```
+
+### set6
+
+```{r gseaP6}
+gseaplot(gse, by = "all", title = gse$Description[6], geneSetID = 6)
+```
+
+### set7
+
+```{r gseaP7}
+gseaplot(gse, by = "all", title = gse$Description[7], geneSetID = 7)
+```
+
+### set8
+
+```{r gseaP8}
+gseaplot(gse, by = "all", title = gse$Description[8], geneSetID = 8)
+```
+
+### set9
+
+```{r gseaP9}
+gseaplot(gse, by = "all", title = gse$Description[9], geneSetID = 9)
+```
+
+### set10
+
+```{r gseaP10}
+gseaplot(gse, by = "all", title = gse$Description[10], geneSetID = 10)
+```
+
+### set11
+
+```{r gseaP11}
+gseaplot(gse, by = "all", title = gse$Description[11], geneSetID = 11)
+```
+
+### set12
+
+```{r gseaP12}
+gseaplot(gse, by = "all", title = gse$Description[12], geneSetID = 12)
+```
+
+### set13
+
+```{r gseaP13}
+gseaplot(gse, by = "all", title = gse$Description[13], geneSetID = 13)
+```
+
+### set14
+
+```{r gseaP14}
+gseaplot(gse, by = "all", title = gse$Description[14], geneSetID = 14)
+```
+
+### set15
+
+```{r gseaP15}
+gseaplot(gse, by = "all", title = gse$Description[15], geneSetID = 15)
+```
+
+# KEGG
+
+## Prepare GeneList
+
+```{r geneListKEGG}
+ids <- bitr(
+  names(original_gene_list),
+  fromType = "ENSEMBL",
+  toType = "ENTREZID",
+  OrgDb = org.Rn.eg.db
+)
+dedup_ids = ids[!duplicated(ids[c("ENSEMBL")]), ]
+filteredDE$Gene <- gsub("\\..*", "", filteredDE$Gene)
+filteredDE2 <- left_join(dedup_ids,
+                         filteredDE,
+                         by = c('ENSEMBL' = 'Gene'))
+kegg_gene_list <- filteredDE2$log2FoldChange
+names(kegg_gene_list) <- filteredDE2$ENTREZID
+kegg_gene_list <- na.omit(kegg_gene_list)
+kegg_gene_list = sort(kegg_gene_list,
+                      decreasing = TRUE)
+```
+
+## run KEGG
+
+```{r runKegg, message = TRUE}
+orgCode <- "rno"
+keggPW <-gseKEGG(
+  kegg_gene_list,
+  organism = orgCode,
+  keyType = "ncbi-geneid",
+  minGSSize = 3,
+  maxGSSize = 800,
+  eps = 1e-10,
+  exponent = 1,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  verbose = TRUE,
+  by = "fgsea")
+saveRDS(keggPW, file = "assets/kegg.rds")
+```
+
+No terms enriched
+
+# Save RData
+
+Saving the entire session as well as the DEseq2 object (as `rds`) for doing the overlap analyses.
+
+```{r saveInfo}
+save.image(file = "assets/PLAC1_JZ_18.5.RData")
+save(hsKOvsWT.up.pce1, hsKOvsWT.dw.pce1, KOvsWT.up.pce1, KOvsWT.dw.pce1, file = "assets/PLAC1_JZ_18.5_genelists.RData")
+```
+
+# MultiQC report:
+
+**NOT YET** MultiQC report is available at this [link](assets/multiqc_report.html){target="_blank"}
+
+# Session Information
+
+```{r sessioninfo}
+sessionInfo()
+```
